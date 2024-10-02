@@ -1,0 +1,4 @@
+fastapi[standard]
+latch-sdk-telefonica
+mysql-connector-python
+python-dotenv

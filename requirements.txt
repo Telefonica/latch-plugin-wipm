@@ -1,0 +1,6 @@
+latch-sdk-telefonica==2.0.2; python_version >= '3.7'
+mysql-connector-python==9.0.0; python_version >= '3.8'
+paramiko==3.5.0; python_version >= '3.6'
+pyside6==6.7.2; python_version < '3.13' and python_version >= '3.9'
+python-dotenv==0.21.0; python_version >= '3.7'
+requests==2.32.3; python_version >= '3.8'
