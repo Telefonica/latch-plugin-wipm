@@ -2,8 +2,7 @@ import os
 import sys
 import json
 import shutil
-import traceback
-from pathlib import Path
+import posixpath
 from typing import Literal
 from string import Template
 
@@ -19,12 +18,19 @@ from PySide6.QtCore import Slot
 from about_gui import Ui_About
 from installer_gui import Ui_MainWindow
 
-TRIGGERS_PATH = "queries/triggers"
-WIPM_AGENT_DIR = "wipm-agent"
+WIPM_AGENT_PATH = "wipm-agent"
+WIPM_AGENT_INSTALL_PATH = posixpath.join("/usr/local", WIPM_AGENT_PATH)
+
+COMMAND_PIP = f"pip3 install -r {WIPM_AGENT_INSTALL_PATH}/requirements.txt"
+COMMAND_GUNICORN = (
+    f"gunicorn -b 0.0.0.0 -w 4 -k uvicorn.workers.UvicornWorker --chdir {WIPM_AGENT_INSTALL_PATH} -D main:app"
+)
+
 CONFIG_AGENT_FILE = "agent_config.json"
-CONFIG_AGENT_PATH = os.path.join(Path.home(), f".{WIPM_AGENT_DIR}")
+CONFIG_AGENT_PATH = os.path.join(os.path.expanduser("~"), f".{WIPM_AGENT_PATH}")
 CONFIG_AGENT_FILE_PATH = os.path.join(CONFIG_AGENT_PATH, CONFIG_AGENT_FILE)
 
+TRIGGERS_PATH = "queries/triggers"
 TRIGGERS = [
     {"name": "before_wp_comments_insert", "action": "INSERT", "template": "readonly.sql"},
     {"name": "before_wp_comments_update", "action": "UPDATE", "template": "readonly.sql"},
@@ -106,12 +112,10 @@ def save_config(host, port=8000):
         "port": port,
     }
 
-    if not os.path.exists(CONFIG_AGENT_PATH):
-        try:
-            os.mkdir(CONFIG_AGENT_PATH)
-        except Exception as e:
-            traceback.print_exc()
-            return
+    try:
+        os.mkdir(CONFIG_AGENT_PATH)
+    except FileExistsError:
+        pass
 
     with open(CONFIG_AGENT_FILE_PATH, "w") as f:
         f.write(json.dumps(agent_config))
@@ -185,12 +189,20 @@ def clear_messages():
     window.ui.local_copy_msg.setText("")
 
 
+def print_msg(widget, msg, msg_type):
+    color = {"info": "green", "warning": "orange", "error": "red"}.get(msg_type, "black")
+    widget.setStyleSheet(f"color: {color};")
+    widget.setText(msg)
+
+
 def get_actual_page():
     return window.ui.stackedWidget.currentIndex()
 
 
 def next_page():
     global wipm_config
+
+    clear_messages()
     window.ui.stackedWidget.setCurrentIndex(get_actual_page() + 1)
     window.ui.go_back_button.setVisible(True)
 
@@ -216,10 +228,13 @@ def next_page():
         window.ui.local_radio_btn.setChecked(True)
         window.ui.next_button.setVisible(False)
 
-    clear_messages()
+        if not sys.platform.startswith("linux"):
+            window.ui.local_copy_btn.setDisabled(True)
+            print_msg(window.ui.local_copy_msg, "⚠ Local copy only available for Linux", "warning")
 
 
 def go_back():
+    clear_messages()
     window.ui.stackedWidget.setCurrentIndex(get_actual_page() - 1)
     window.ui.next_button.setDisabled(False)
 
@@ -234,8 +249,6 @@ def go_back():
 
     if get_actual_page() == 4:
         window.ui.next_button.setVisible(True)
-
-    clear_messages()
 
 
 def init_db(wordpress_user):
@@ -266,9 +279,10 @@ def check_triggers():
 
 
 def create_env_file():
-    env_file = os.path.join(WIPM_AGENT_DIR, ".env")
+    env_file = os.path.join(WIPM_AGENT_PATH, ".env")
     try:
         dotenv.set_key(env_file, "DB_HOST", wipm_config.host)
+        dotenv.set_key(env_file, "DB_PORT", wipm_config.port)
         dotenv.set_key(env_file, "DB_USER", wipm_config.db_user)
         dotenv.set_key(env_file, "DB_PASSWORD", wipm_config.password)
         dotenv.set_key(env_file, "DB_NAME", wipm_config.db)
@@ -296,14 +310,11 @@ def check_service_status():
     try:
         response = requests.get(f"http://{host_config['host']}:{host_config['port']}/ping")
         if response.status_code == 200:
-            window.ui.main_msg.setStyleSheet("color: green;")
-            window.ui.main_msg.setText("Service is running!")
+            print_msg(window.ui.main_msg, "Service is running!", "info")
         else:
-            window.ui.main_msg.setStyleSheet("color: red;")
-            window.ui.main_msg.setText("Service is not running!")
+            print_msg(window.ui.main_msg, "Service is not running!", "error")
     except requests.exceptions.ConnectionError:
-        window.ui.main_msg.setStyleSheet("color: red;")
-        window.ui.main_msg.setText("Service is not running!")
+        print_msg(window.ui.main_msg, "Service is not running!", "error")
 
 
 @Slot()
@@ -355,12 +366,12 @@ def test_db_connection():
 
                 # Enable the next button
                 window.ui.next_button.setDisabled(False)
-                window.ui.test_db_connection_msg.setStyleSheet("color: green;")
-                window.ui.test_db_connection_msg.setText("Connection successful!")
+                print_msg(window.ui.test_db_connection_msg, "Connection successful!", "info")
             except mysql.connector.Error as err:
-                window.ui.test_db_connection_msg.setStyleSheet("color: red;")
-                window.ui.test_db_connection_msg.setText(
-                    f"{str(err)}\nAre you sure the user has the right permissions?"
+                print_msg(
+                    window.ui.test_db_connection_msg,
+                    f"{str(err)}\nAre you sure the user has the right permissions?",
+                    "error",
                 )
 
 
@@ -369,8 +380,7 @@ def pair_with_latch():
     global latch_config
 
     if latch_config:
-        window.ui.pair_with_latch_msg.setStyleSheet("color: red;")
-        window.ui.pair_with_latch_msg.setText("You have already paired with Latch")
+        print_msg(window.ui.pair_with_latch_msg, "You have already paired with Latch", "error")
         return
 
     # Get the values from the input fields
@@ -379,9 +389,7 @@ def pair_with_latch():
     latch_pair_code = window.ui.latch_pair_code_input.text()
 
     if latch_app_id == "" or latch_secret == "" or latch_pair_code == "":
-        window.ui.pair_with_latch_msg.setStyleSheet("color: red;")
-        window.ui.pair_with_latch_msg.setText("Please fill all the fields")
-        window.ui.pair_with_latch_msg.setStyleSheet("color: red;")
+        print_msg(window.ui.pair_with_latch_msg, "Please fill all the fields", "error")
         return
 
     api = latch.Latch(latch_app_id, latch_secret)
@@ -390,8 +398,7 @@ def pair_with_latch():
     responseError = response.get_error()
 
     if responseError:
-        window.ui.pair_with_latch_msg.setStyleSheet("color: red;")
-        window.ui.pair_with_latch_msg.setText(responseError.message)
+        print_msg(window.ui.pair_with_latch_msg, responseError.message, "error")
         return
 
     latch_config = LatchConfig(latch_app_id, latch_secret, responseData["accountId"])
@@ -399,8 +406,7 @@ def pair_with_latch():
     create_operations(api, latch_config)
     create_env_file()
 
-    window.ui.pair_with_latch_msg.setStyleSheet("color: green;")
-    window.ui.pair_with_latch_msg.setText("Pairing successful!")
+    print_msg(window.ui.pair_with_latch_msg, "Pairing successful!", "info")
     window.ui.pair_with_latch_btn.setDisabled(True)
     window.ui.next_button.setDisabled(False)
 
@@ -412,8 +418,7 @@ def create_triggers():
     global wipm_config
 
     if check_triggers():
-        window.ui.opt_msg.setStyleSheet("color: green;")
-        window.ui.opt_msg.setText("Triggers already created")
+        print_msg(window.ui.opt_msg, "Triggers already created", "info")
 
         triggers_enabled = True
 
@@ -444,14 +449,12 @@ def create_triggers():
                     cursor.execute(result)
             except Exception as e:
                 print(f"Error executing trigger: {trigger['action']}, {trigger['name']}")
-                window.ui.opt_msg.setStyleSheet("color: red;")
-                window.ui.opt_msg.setText(f"Error executing trigger: {e}")
+                print_msg(window.ui.opt_msg, f"Error executing trigger: {e}", "error")
                 return
 
     execute_query("SET GLOBAL log_bin_trust_function_creators = 0;")
 
-    window.ui.opt_msg.setStyleSheet("color: green;")
-    window.ui.opt_msg.setText(f"Triggers created successfully!")
+    print_msg(window.ui.opt_msg, "Triggers created successfully!", "info")
     triggers_enabled = True
     if triggers_enabled and logs_enabled:
         window.ui.next_button.setDisabled(False)
@@ -463,9 +466,7 @@ def enable_db_logs():
     execute_query("TRUNCATE table mysql.general_log")
     execute_query("SET GLOBAL general_log=1")
     execute_query("SET GLOBAL log_output='TABLE'")
-
-    window.ui.opt_msg.setStyleSheet("color: green;")
-    window.ui.opt_msg.setText("Logs enabled successfully!")
+    print_msg(window.ui.opt_msg, "Logs enabled successfully!", "info")
 
     global logs_enabled
     logs_enabled = True
@@ -485,6 +486,21 @@ def view_remote_agent():
 
 
 @Slot()
+def copy_wipm_agent():
+    print_msg(window.ui.local_copy_msg, "Installing agent...", "warning")
+    try:
+        shutil.copytree(WIPM_AGENT_PATH, WIPM_AGENT_INSTALL_PATH)
+    except Exception:
+        print_msg(window.ui.local_copy_msg, "Agent already copied", "warning")
+    finally:
+        # Install requirements
+        os.system(COMMAND_PIP)
+        save_config("127.0.0.1")
+    os.system(COMMAND_GUNICORN)
+    print_msg(window.ui.local_copy_msg, "WiPM Agent running!", "info")
+
+
+@Slot()
 def upload_wipm_agent():
     host = window.ui.ssh_host_input.text()
     username = window.ui.ssh_user_input.text()
@@ -497,59 +513,48 @@ def upload_wipm_agent():
 
         sftp = client.open_sftp()
         try:
-            sftp.mkdir(WIPM_AGENT_DIR)
-        except IOError:
-            print(f"(assuming {WIPM_AGENT_DIR}/ already exists)")
+            sftp.chdir("/usr/local")
+            sftp.mkdir(WIPM_AGENT_PATH)
+        except FileNotFoundError:
+            print_msg(window.ui.ssh_upload_msg, "/usr/local path doesn't exist, is it a Linux machine?", "error")
+            sftp.close()
+            client.close()
+            return
+        except PermissionError:
+            print_msg(window.ui.ssh_upload_msg, "Permission denied, are you root?", "error")
+            sftp.close()
+            client.close()
+            return
+        except OSError as e:
+            print("Directory already exists, continuing...")
+        except Exception as e:
+            print(f"Error: {e}")
+            sftp.close()
+            client.close()
+            return
 
-        for item in os.listdir(WIPM_AGENT_DIR):
-            directory = os.path.join(WIPM_AGENT_DIR, item)
-            sftp.put(directory, directory)
+        for item in os.listdir(WIPM_AGENT_PATH):
+            localpath = os.path.join(WIPM_AGENT_PATH, item)
+            sftp.put(localpath, f"/usr/local/{WIPM_AGENT_PATH}/{item}")
 
         sftp.close()
 
         save_config(host)
-        complete_dir = os.path.join(Path.home(), f"{WIPM_AGENT_DIR}")
 
         # Install requirements
-        client.exec_command(f"pip3 install -r {WIPM_AGENT_DIR}/requirements.txt")
-        client.exec_command(
-            f"gunicorn -b 0.0.0.0 -w 4 -k uvicorn.workers.UvicornWorker --chdir {complete_dir} -D main:app"
-        )
+        client.exec_command(COMMAND_PIP)
+        client.exec_command(COMMAND_GUNICORN)
         client.close()
+        print_msg(window.ui.ssh_upload_msg, "WiPM Agent uploaded and running!", "info")
 
     except Exception as e:
-        window.ui.ssh_upload_msg.setStyleSheet("color: red;")
-        window.ui.ssh_upload_msg.setText("Error uploading the agent")
+        print_msg(window.ui.ssh_upload_msg, "Error uploading the agent", "error")
         try:
             client.close()
         except:
             pass
         finally:
             return
-
-    window.ui.ssh_upload_msg.setStyleSheet("color: green;")
-    window.ui.ssh_upload_msg.setText("WiPM Agent uploaded and running!")
-
-
-@Slot()
-def copy_wipm_agent():
-    window.ui.local_copy_msg.setStyleSheet("color: orange;")
-    window.ui.local_copy_msg.setText("Installing agent...")
-
-    complete_dir = os.path.join(Path.home(), f"{WIPM_AGENT_DIR}")
-    try:
-        shutil.copytree(WIPM_AGENT_DIR, complete_dir)
-    except Exception as e:
-        window.ui.local_copy_msg.setStyleSheet("color: orange;")
-        window.ui.local_copy_msg.setText("Agent already copied")
-    finally:
-        # Install requirements
-        os.system(f"pip3 install -r {complete_dir}/requirements.txt")
-        save_config("127.0.0.1")
-
-    os.system(f"gunicorn -b 0.0.0.0 -w 4 -k uvicorn.workers.UvicornWorker --chdir {complete_dir} -D main:app")
-    window.ui.local_copy_msg.setStyleSheet("color: green;")
-    window.ui.local_copy_msg.setText("WiPM Agent running!")
 
 
 @Slot()
@@ -558,6 +563,11 @@ def show_about():
 
 
 if __name__ == "__main__":
+    if sys.platform.startswith("linux"):
+        if os.geteuid() != 0:
+            print("Please run this script as root")
+            sys.exit(1)
+
     app = QApplication(sys.argv)
 
     window = MainWindow()
